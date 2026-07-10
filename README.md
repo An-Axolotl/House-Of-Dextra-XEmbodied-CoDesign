@@ -9,7 +9,7 @@ At a high level, the project combines:
 - simulation-based policy evaluation and search,
 - and real-world control/deployment tooling.
 
-For full method details, experiment setup, and results, see https://openreview.net/pdf?id=k8ovuXEQQu.
+For full method details, experiment setup, and results, check out [our paper](https://openreview.net/pdf?id=k8ovuXEQQu).
 
 For videos and hardware build guide, please see [our website](https://an-axolotl.github.io/HouseofDextra/index.html).
 
