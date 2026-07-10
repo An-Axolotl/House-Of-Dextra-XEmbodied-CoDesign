@@ -11,7 +11,7 @@ At a high level, the project combines:
 
 For full method details, experiment setup, and results, see https://openreview.net/pdf?id=k8ovuXEQQu.
 
-For hardware build instructions, see the [House of Dextra Build Guide](https://an-axolotl.github.io/HouseofDextra/build_guide).
+For videos and hardware build guide, please see [our website](https://an-axolotl.github.io/HouseofDextra/index.html).
 
 ## Repository Map
 
