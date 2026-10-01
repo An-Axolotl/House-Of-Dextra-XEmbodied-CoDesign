@@ -9,7 +9,9 @@ At a high level, the project combines:
 - simulation-based policy evaluation and search,
 - and real-world control/deployment tooling.
 
-For full method details, experiment setup, and results, check out [our paper](https://openreview.net/pdf?id=k8ovuXEQQu).
+**Published at ICLR 2026.** [[arXiv](https://arxiv.org/abs/2512.03743)] [[OpenReview](https://openreview.net/pdf?id=k8ovuXEQQu)] [[Hugging Face](https://huggingface.co/papers/2512.03743)]
+
+For full method details, experiment setup, and results, check out [our paper](https://arxiv.org/abs/2512.03743).
 
 For videos and hardware build guide, please see [our website](https://an-axolotl.github.io/HouseofDextra/index.html).
 
@@ -36,13 +38,13 @@ Setup, prerequisites, and Isaac Sim installation steps are documented in [`SETUP
 If you use this in your research, please cite:
 
 ```bibtex
-@article{fay2025crossembodied,
-  title={House of Dextra: Cross Embodied Co-Design for Dexterous Hands},
+@inproceedings{fay2026houseofdextra,
+  title={House of Dextra: Cross-Embodied Co-Design for Dexterous Hands},
   author={Fay, Kehlani and Djapri, Darin and Zorin, Anya and Clinton, James
           and El Lahib, Ali and Su, Hao and Tolley, Michael T. and Yi, Sha
           and Wang, Xiaolong},
-  journal={arXiv preprint},
-  year={2025},
-  month={December}
+  booktitle={International Conference on Learning Representations (ICLR)},
+  year={2026},
+  url={https://arxiv.org/abs/2512.03743}
 }
 ```
