@@ -92,6 +92,8 @@ Fingertip selection:
 - `--fingertip-random`
 - `--fingertip-f1 TYPE ... --fingertip-f5 TYPE`
 
+The chosen tips are appended to the hand name as `_t<letters>` (`s`/`w`/`r`/`t`, `x` for ghost slots).
+
 Servo/ghost behavior:
 
 - `--min-servos`, `--max-servos`
