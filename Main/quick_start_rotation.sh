@@ -19,15 +19,11 @@ PLACEMENT_MODE="both"
 EVAL_GROUPS="all"   # "all" or comma-separated subset, e.g. "sym5" or "sym3,sym4,sym5"
 SHUFFLE_GROUPS=1    # 1: reshuffle selected group order each cycle (multi-group only), 0: fixed order
 BATCH_SIZE=32
-SELECTION="gumbel"    # successor selection during rollouts: gumbel (paper: V + tau*Gumbel on standardized values) | epsilon
-EPSILON=1.0           # initial exploration, annealed to 0.05 by the last iteration. Gumbel temperature on standardized
-                      # values: 1.0 validated best (0.4 is too greedy and can trap the search); use 0.4 for SELECTION=epsilon
-FOCUS_METRIC="reward" # per-hand metric used as the design score: reward (norm_reward; what earlier runs
-                      # effectively optimized) | rotation (omega_score) | success (success_rate)
-EVAL_TIMEOUT=300      # wall-clock seconds for one play.py evaluation; must cover the 60 s simulated
-                      # episode across EVAL_ENVS, otherwise scores come from truncated episodes
-MORPH_FINGERTIPS=0    # 1 = policy observation includes fingertip type (55-dim morphology vector). Only with
-                      # checkpoints trained with CODESIGN_MORPH_FINGERTIPS=1; the shipped ones were not.
+SELECTION="gumbel"    # gumbel (Gumbel-perturbed argmax, paper) | epsilon (epsilon-greedy)
+EPSILON=1.0           # initial exploration, annealed to 0.05: Gumbel temperature (1.0) or epsilon rate (0.4)
+FOCUS_METRIC="reward" # design score: reward (norm_reward) | rotation (omega_score) | success
+EVAL_TIMEOUT=300      # wall-clock seconds per evaluation; must cover the 60 s simulated episode
+MORPH_FINGERTIPS=0    # 1 = fingertip type in the policy input; only with policies trained with CODESIGN_MORPH_FINGERTIPS=1
 DEBUG=0
 
 # Paths for your actual file locations

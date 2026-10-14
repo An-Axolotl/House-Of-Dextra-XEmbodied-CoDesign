@@ -111,11 +111,10 @@ Output naming:
 hand_f1_<tok>_f2_<tok>_f3_<tok>_f4_<tok>_f5_<tok>_t<tips>.urdf
 ```
 
-- `<tok>` is the per-finger code with the servo count implied by its length (`g1g20` = 3 servos,
-  `g20` = 2 servos, empty = ghost finger, e.g. `hand_f1_230_f2_40_f3_310_f4_f5_550`).
-- `_t<tips>` is one letter per slot: `s`/`w`/`r`/`t` = standard/wedged/rounded/thinner, `x` = ghost.
-  The simulator parses morphology (and, when enabled, fingertip type) from this file name, so it
-  must be preserved through URDF->USD conversion.
+- `<tok>`: per-finger code, servo count implied by length (`g1g20` = 3 servos, `g20` = 2, empty = ghost).
+- `_t<tips>`: one letter per slot, `s`/`w`/`r`/`t` = standard/wedged/rounded/thinner, `x` = ghost.
+
+The simulator parses morphology from this file name, so keep it through URDF->USD conversion.
 
 Frequently used presets:
 

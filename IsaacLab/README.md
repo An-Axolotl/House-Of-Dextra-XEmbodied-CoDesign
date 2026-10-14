@@ -93,32 +93,23 @@ When multiple hands are selected, `lego_hand.py` passes all matching USDs to `Mu
 
 ## Evaluation Controls (used by `Main/ghs_runner.py`)
 
-`play.py` flags:
-
-- `--max_episodes N`, `--timeout S`: stop after N finished episodes or S seconds of wall clock.
-  If the timeout fires before any episode finishes, the final payload sets `evaluation_truncated`
-  and per-hand numbers are partial-episode values.
-- `--metrics_out FILE`: also append the `GHS_HAND_METRICS_JSON` / `GHS_METRICS_JSON_FINAL` lines to a file.
-- `--use_unexported`: skip the TorchScript export and run the loaded agent directly.
+`play.py` flags: `--max_episodes N`, `--timeout S` (sets `evaluation_truncated` if it fires before any
+episode ends), `--metrics_out FILE` (also writes the `GHS_*_JSON` lines there), `--use_unexported`.
 
 Environment variables read by the task:
 
-- `CODESIGN_HAND_USD_PATH_<i>`: hand USDs to evaluate in parallel (one per index, i from 0).
+- `CODESIGN_HAND_USD_PATH_<i>`: hand USDs to evaluate in parallel (i from 0).
 - `CODESIGN_HAND_GROUP`, `CODESIGN_JOINT_PRESET`: kinematic family and joint preset.
 - `CODESIGN_GHS_EVALUATION=1`: fixed 60 s episodes, no early termination.
-- `CODESIGN_FIXED_DR_LEVEL=k`: evaluate at ADR level k (ranges interpolated to k/num_increments).
-- `CODESIGN_DISABLE_ADR_ADAPTATION=1`: never raise the ADR level during the run.
-- `CODESIGN_MORPH_FINGERTIPS=1`: include fingertip type in the policy's morphology vector
-  (35 -> 55 dims; needs assets with the `_t<letters>` name token and policies trained the same way).
+- `CODESIGN_FIXED_DR_LEVEL=k`, `CODESIGN_DISABLE_ADR_ADAPTATION=1`: pin the ADR level for evaluation.
+- `CODESIGN_MORPH_FINGERTIPS=1`: fingertip type in the morphology vector (35 -> 55 dims; policies must match).
 
-Per-hand metrics include `norm_reward`, `omega_score`, `success_rate`, `total_episodes` and
-`unstable_episode_fraction` (episodes with non-finite state or the object flung from the hand).
+Per-hand metrics: `norm_reward`, `omega_score`, `success_rate`, `total_episodes`,
+`unstable_episode_fraction` (non-finite state or object flung away).
 
 ## Notes
 
-- Assets built with the current generator carry a `_t<letters>` fingertip token at the end of
-  the name (e.g. `hand_f1_110_f2_110_f3_110_f4_110_f5_110_tsssss`); older assets without it still load,
-  with fingertip features zeroed.
+- New assets end with a `_t<letters>` fingertip token (e.g. `..._f5_110_tsssss`); older assets without it still load.
 - `--hand` accepts a hand name, a hand directory, or a direct `.usd` path.
 - `--hands` accepts multiple names, directories, or `.usd` paths.
 - If a selected hand has metadata sidecars, `reorientation_env.py` will load them from:

@@ -47,11 +47,9 @@ f1_finger1_tip, f2_finger1_tip, f3_finger1_tip, f4_finger1_tip, f5_finger1_tip
 ### Observation Space
 - **Size**: 168 by default = 3 history steps × 43 (20 normalized joint positions, 20 current targets,
   3 privileged object position) + 4 object-type one-hot + 35 morphology vector
-- **Morphology vector**: per finger presence, per-link servo presence and grammar scale, parsed from
-  the hand's USD file name. With `CODESIGN_MORPH_FINGERTIPS=1` a 4-way fingertip one-hot per finger is
-  appended (35 -> 55, observation 188); policies must be trained and evaluated with the same setting.
-- Joint positions are normalized by the joint range with the range clamped to >= 1e-3 rad, so ghost
-  (removed-servo) joints with tiny ranges cannot produce huge or non-finite observations.
+- **Morphology vector**: finger presence, per-link servo presence and grammar scale, parsed from the
+  USD file name; `CODESIGN_MORPH_FINGERTIPS=1` appends a fingertip one-hot per finger (35 -> 55, observation 188).
+- Joint normalization clamps the joint range to >= 1e-3 rad so ghost joints cannot produce huge or non-finite values.
 
 ### Reward Function
 The reward includes:
@@ -69,11 +67,9 @@ Episodes terminate when:
 - Object is flipped (z-axis misalignment)
 - Maximum episode length is reached
 
-In GHS evaluation mode (`CODESIGN_GHS_EVALUATION=1`) early termination is disabled and every episode
-runs for a fixed `fixed_eval_time_s` (60 s) so designs are compared on equal time. Per-design
-accumulators are rolled up once per episode in `_reset_idx`; the initial reset does not count as an
-episode. Envs whose state becomes non-finite (or whose object is flung > 2 m from the hand) are
-flagged and reported as `unstable_episode_fraction` instead of poisoning the averages.
+With `CODESIGN_GHS_EVALUATION=1` early termination is off and every episode lasts `fixed_eval_time_s`
+(60 s). Episodes are counted once, in `_reset_idx`; envs with non-finite state or an object flung > 2 m
+away are reported per design as `unstable_episode_fraction` rather than poisoning the averages.
 
 ## Usage
 
