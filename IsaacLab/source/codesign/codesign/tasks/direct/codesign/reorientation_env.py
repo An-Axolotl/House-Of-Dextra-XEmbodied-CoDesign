@@ -135,6 +135,15 @@ class ReorientationEnv(DirectRLEnv):
                                         self.cfg.adr_custom_cfg_dict)
             self.step_since_last_dr_change = 0
             self.leap_adr.set_num_increments(self.cfg.starting_adr_increments)
+            # Evaluation controls (exported by Main/quick_start_rotation.sh): evaluate every design at one
+            # fixed DR level and never adapt it mid-run, so scores are comparable across designs/iterations.
+            fixed_level = os.environ.get("CODESIGN_FIXED_DR_LEVEL", "").strip()
+            if fixed_level:
+                self.leap_adr.set_level(int(fixed_level))
+                print(f"[adr] DR level fixed at {self.leap_adr.num_increments()} (CODESIGN_FIXED_DR_LEVEL)")
+            self._adr_adaptation_enabled = os.environ.get("CODESIGN_DISABLE_ADR_ADAPTATION", "0").strip().lower() not in ("1", "true", "yes")
+            if not self._adr_adaptation_enabled:
+                print("[adr] ADR adaptation disabled (CODESIGN_DISABLE_ADR_ADAPTATION)")
             adr_utils.init_adr_obs_act_noise(self)
             
             # Update observation buffer for latency
@@ -145,8 +154,8 @@ class ReorientationEnv(DirectRLEnv):
                 device=cfg.sim.device, 
                 dtype=torch.float
             )
-            self.obs_latency = torch.empty((self.num_envs, self.cfg.obs_per_timestep), device=self.cfg.sim.device)
-            self.act_latency = torch.empty((self.num_envs, self.cfg.action_space), device=self.cfg.sim.device)
+            self.obs_latency = torch.zeros((self.num_envs, self.cfg.obs_per_timestep), device=self.cfg.sim.device)
+            self.act_latency = torch.zeros((self.num_envs, self.cfg.action_space), device=self.cfg.sim.device)
             self.act_hist_buf = torch.zeros(
                 self.num_envs, 
                 self.cfg.action_space, 
@@ -215,22 +224,10 @@ class ReorientationEnv(DirectRLEnv):
                 self._design_hit_count.index_add_(0, d_with_data, self._ep_hits[envs_with_data])
                 self._design_omega_sum.index_add_(0, d_with_data, self._ep_omega_sum[envs_with_data])
                 self._design_contact_steps.index_add_(0, d_with_data, self._ep_contact_steps[envs_with_data])
+                self._design_unstable_episodes.index_add_(0, d_with_data, self._ep_unstable[envs_with_data])
                 
                 print(f"[force_aggregate] Aggregated metrics from {has_data.sum().item()} environments with incomplete episodes")
         
-    def _rollup_done_episodes(self, done_env_ids: torch.Tensor):
-        if done_env_ids.numel() == 0:
-            return
-        # map env -> design indices
-        d_idx = self.env_to_design_idx[done_env_ids]  # shape [K]
-        # index_add into per-design accumulators
-        self._design_total_steps.index_add_(0, d_idx, self._ep_len[done_env_ids])
-        self._design_hit_count.index_add_(0, d_idx, self._ep_hits[done_env_ids])
-        self._design_total_episodes.index_add_(0, d_idx, torch.ones_like(d_idx, dtype=torch.long))
-        # reset per-env counters
-        self._ep_len[done_env_ids]  = 0
-        self._ep_hits[done_env_ids] = 0
-
     def print_hand_design_performance(self):
         """Print performance summary for each hand design with raw omega metrics"""
         summary = self.get_hand_design_metrics_summary_gpu()
@@ -342,6 +339,9 @@ class ReorientationEnv(DirectRLEnv):
                 "step_fraction_evaluated": float(contact_steps / max(steps_i, 1)), # Should be ~1.0 now
                 "evaluation_mode": self.cfg.ghs_evaluation_mode,
                 "evaluation_time_s": float(time_s),
+                # fraction of this design's episodes in which the simulation produced non-finite values or the
+                # object was flung far from the hand; a non-zero value means the score is not trustworthy
+                "unstable_episode_fraction": float(self._design_unstable_episodes[i].item()) / max(tepi, 1),
             }
 
         return out
@@ -415,7 +415,19 @@ class ReorientationEnv(DirectRLEnv):
         self.extras["log"]['pitch'] = self.object_angvel[:, 1].mean()
         self.extras["log"]['yaw'] = self.object_angvel[:, 2].mean()
 
-        abs_omega_z = torch.abs(self.object_angvel[:, 2])       # [N] float
+        # ---- numerical safety: one blown-up env must not poison every design's statistics ----
+        # (means over envs turn NaN if a single env is NaN; the design's average reward then becomes NaN.)
+        finite = (torch.isfinite(total_reward)
+                  & torch.isfinite(self.object_pos).all(dim=-1)
+                  & torch.isfinite(self.object_angvel).all(dim=-1)
+                  & torch.isfinite(self.hand_dof_pos).all(dim=-1))
+        flung = torch.norm(self.object_pos - self.in_hand_pos, p=2, dim=-1) > 2.0   # object far outside the workspace
+        self._ep_unstable |= ((~finite) | flung).long()
+        total_reward = torch.where(finite, total_reward, torch.zeros_like(total_reward))
+        self.extras["log"]["nonfinite_envs"] = (~finite).sum().float()
+        self.extras["log"]["flung_object_envs"] = flung.sum().float()
+
+        abs_omega_z = torch.nan_to_num(torch.abs(self.object_angvel[:, 2]), nan=0.0, posinf=0.0)   # [N] float
 
         # Track omega regardless of contact.
         self._ep_omega_sum += abs_omega_z.detach()  # No contact gating
@@ -579,7 +591,9 @@ class ReorientationEnv(DirectRLEnv):
             env_ids = self.hand._ALL_INDICES
         env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         d_idx   = self.env_to_design_idx[env_ids]
-        valid   = d_idx.ge(0)
+        # Only envs that actually stepped count as an episode; this skips the initial reset,
+        # which used to record one zero-reward episode per env.
+        valid   = d_idx.ge(0) & (self._ep_len[env_ids] > 0)
         if valid.any():
             d = d_idx[valid]
             self._design_total_episodes.index_add_(0, d, torch.ones_like(d, dtype=torch.long))
@@ -595,6 +609,7 @@ class ReorientationEnv(DirectRLEnv):
             self._design_hit_count.index_add_(0, d, self._ep_hits[env_ids][valid])
             self._design_omega_sum.index_add_(0, d, self._ep_omega_sum[env_ids][valid])
             self._design_contact_steps.index_add_(0, d, self._ep_contact_steps[env_ids][valid])
+            self._design_unstable_episodes.index_add_(0, d, self._ep_unstable[env_ids][valid])
             
         # clear per-env accumulators for the reset envs
         self._ep_reward[env_ids]  = 0
@@ -608,6 +623,7 @@ class ReorientationEnv(DirectRLEnv):
         self._ep_len[env_ids]     = 0
         self._ep_omega_sum[env_ids] = 0
         self._ep_contact_steps[env_ids] = 0
+        self._ep_unstable[env_ids] = 0
         
         # Calculate ADR criteria if enabled
         if self.cfg.enable_adr:
@@ -711,7 +727,8 @@ class ReorientationEnv(DirectRLEnv):
             
             self.extras["log"]["num_adr_increases"] = self.leap_adr.num_increments()
             
-            if self.step_since_last_dr_change >= self.cfg.min_steps_for_dr_change and\
+            if self._adr_adaptation_enabled and \
+                self.step_since_last_dr_change >= self.cfg.min_steps_for_dr_change and\
                 (adr_criteria  >= self.cfg.min_rot_adr_coeff):
                 self.step_since_last_dr_change = 0
                 self.leap_adr.increase_ranges()
@@ -902,6 +919,7 @@ class ReorientationEnv(DirectRLEnv):
         self._design_hit_count      = torch.zeros(D, dtype=torch.long, device=self.device)
         self._design_omega_sum      = torch.zeros(D, dtype=torch.float32, device=self.device)
         self._design_contact_steps  = torch.zeros(D, dtype=torch.long, device=self.device)
+        self._design_unstable_episodes = torch.zeros(D, dtype=torch.long, device=self.device)  # episodes with non-finite state or object flung away
     
         # Per-env episode accumulators (GPU)
         self._ep_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -916,6 +934,7 @@ class ReorientationEnv(DirectRLEnv):
         self._ep_hits = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # add this
         self._ep_omega_sum = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._ep_contact_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._ep_unstable = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         
         self.env_action_mask = mask
 
@@ -943,13 +962,21 @@ class ReorientationEnv(DirectRLEnv):
             usd_path = get_env_robot_usd_path(stage, i)
             base = os.path.basename(usd_path) if usd_path else ""
             spec = parse_morph_from_filename(base, F_MAX=self.cfg.F_MAX, L_MAX=self.cfg.L_MAX, G_MAX=self.cfg.G_SCALE_MAX)
-            vecs.append(build_hand_morph_obs(spec))
+            vecs.append(build_hand_morph_obs(spec, include_fingertips=self.cfg.include_fingertips_in_morph))
+            if self.cfg.include_fingertips_in_morph and not hasattr(self, "_warned_no_tip_token"):
+                active_without_tip = [f for f in range(1, self.cfg.F_MAX + 1) if spec.get(f"F{f}_ACTIVE", 0) and spec.get(f"F{f}_TIP", -1) < 0]
+                if active_without_tip:
+                    print(f"[morph] WARNING: fingertip conditioning is on but '{base}' has no '_t<letters>' token; "
+                          f"tip features are zero for fingers {active_without_tip}. Rebuild assets with the current builder.")
+                    self._warned_no_tip_token = True
 
         morph = torch.tensor(vecs, dtype=torch.float32, device=self.device)
         expected = self.cfg.MORPH_DIM  # set to F + F*(L + L) = F*(2L) + F
         if morph.shape[1] != expected:
             raise RuntimeError(f"MORPH_DIM mismatch: got {morph.shape[1]}, expected {expected}")
         self.env_morph_vec = morph
+        print(f"[morph] morphology vector: {morph.shape[1]} dims (fingertip conditioning "
+              f"{'on' if self.cfg.include_fingertips_in_morph else 'off'})")
         
         if self.cfg.debug:
             print("\n\n")
@@ -1082,7 +1109,9 @@ def scale(x, lower, upper):
 
 @torch.jit.script
 def unscale(x, lower, upper):
-    return (2.0 * x - upper - lower) / (upper - lower)
+    # Ghost/removed servos have joint ranges as small as 1e-8 rad; dividing by that turns solver
+    # jitter into huge or non-finite observations. Clamp the range so dead joints map to ~0.
+    return (2.0 * x - upper - lower) / torch.clamp(upper - lower, min=1e-3)
 
 
 @torch.jit.script

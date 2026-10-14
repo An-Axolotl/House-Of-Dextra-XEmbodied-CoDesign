@@ -1,5 +1,25 @@
 import os, re
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, List
+
+# Fingertip vocabulary as encoded in generated asset names ("_t" + one letter per finger slot).
+TIP_TYPES = ["standard", "wedged", "rounded", "thinner"]
+TIP_LETTER_TO_IDX = {"s": 0, "w": 1, "r": 2, "t": 3}   # "x" = ghost slot (no fingertip)
+NUM_TIP_TYPES = len(TIP_TYPES)
+
+
+def morph_dim(F_MAX: int, L_MAX: int, include_fingertips: bool) -> int:
+    """Length of the morphology observation: presence + per-finger servo mask + link scales (+ tip one-hot)."""
+    return F_MAX * (1 + 2 * L_MAX) + (F_MAX * NUM_TIP_TYPES if include_fingertips else 0)
+
+
+def parse_fingertips_from_filename(basename: str, F_MAX: int) -> List[int]:
+    """Per-finger tip index from the "_t<letters>" token, or -1 when absent/ghost (older assets have no token)."""
+    tips = [-1] * F_MAX
+    m = re.search(r"_t([swrtx]{%d})(?:[._]|$)" % F_MAX, basename.lower())
+    if m:
+        for f, ch in enumerate(m.group(1)):
+            tips[f] = TIP_LETTER_TO_IDX.get(ch, -1)
+    return tips
 
 def _digits_to_links(digits: str, L_MAX: int, G_MAX: int):
     # map rightmost -> END, then MIDDLE, then BASE (right-align)
@@ -42,9 +62,13 @@ def parse_morph_from_filename(basename: str, F_MAX: int, L_MAX: int, G_MAX: int)
     for f in range(1, F_MAX + 1):
         out[f"F{f}_ACTIVE"] = 0
         out[f"F{f}_NUM_LINKS"] = 0
+        out[f"F{f}_TIP"] = -1
         for l in range(1, L_MAX + 1):
             out[f"F{f}_LINK{l}_SCALE"] = 0
             out[f"F{f}_LINK{l}_HAS_SERVO"] = 0
+
+    for f, tip in enumerate(parse_fingertips_from_filename(basename, F_MAX), start=1):
+        out[f"F{f}_TIP"] = tip
 
     # Updated regex to handle optional digits (empty string allowed)
     for m in re.finditer(r"f([1-5])_([0-9]*)", basename.lower()):
@@ -108,7 +132,9 @@ def build_morph_vector(cfg, *, scale_mode="frac0"):
 
     return vec
 
-def build_hand_morph_obs(cfg: Dict) -> List[float]:
+def build_hand_morph_obs(cfg: Dict, include_fingertips: bool = False) -> List[float]:
+    """Morphology observation. Layout (kept stable so older checkpoints/indices stay valid):
+    [F_MAX presence] + per finger [L_MAX servo-present, L_MAX grammar scale] (+ per finger NUM_TIP_TYPES tip one-hot)."""
     F_MAX  = int(cfg["F_MAX"]); L_MAX = int(cfg["L_MAX"]); G_MAX = int(cfg["G_SCALE_MAX"])
     vec: List[float] = []
 
@@ -123,4 +149,13 @@ def build_hand_morph_obs(cfg: Dict) -> List[float]:
         scales  = [int(cfg.get(f"F{f}_LINK{l}_SCALE", 0)) for l in range(1, L_MAX + 1)]
         # Normalize: 0→0.0 (no servo), 1-10→0.1-1.0
         vec.extend([0.0 if s == 0 else (s / float(G_MAX)) for s in scales])
+
+    if include_fingertips:
+        # Per finger: one-hot over TIP_TYPES; all zeros for ghost slots or assets without a tip token.
+        for f in range(1, F_MAX + 1):
+            tip = int(cfg.get(f"F{f}_TIP", -1))
+            oh = [0.0] * NUM_TIP_TYPES
+            if 0 <= tip < NUM_TIP_TYPES and cfg.get(f"F{f}_ACTIVE", 0):
+                oh[tip] = 1.0
+            vec.extend(oh)
     return vec
