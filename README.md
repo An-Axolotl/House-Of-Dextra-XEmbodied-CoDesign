@@ -2,7 +2,7 @@
 
 ![House of Dextra](header.gif)
 
-House of Dextra is the unified repository for the dexterous hand co-design stack used in *House of Dextra: Cross-Embodied Co-Design for Dexterous Hands*.
+House of Dextra is the unified repository for the robot hand co-design stack used in *House of Dextra: Cross-Embodied Co-Design for Dexterous Hands* ([project page](https://an-axolotl.github.io/HouseofDextra/)). It co-designs robot hand hardware (morphology) and software (control policy) for dexterous manipulation using cross-embodiment learning.
 
 At a high level, the project combines:
 - morphology generation for candidate hand designs,
