@@ -49,7 +49,7 @@ f1_finger1_tip, f2_finger1_tip, f3_finger1_tip, f4_finger1_tip, f5_finger1_tip
   3 privileged object position) + 4 object-type one-hot + 35 morphology vector
 - **Morphology vector**: finger presence, per-link servo presence and grammar scale, parsed from the
   USD file name; `CODESIGN_MORPH_FINGERTIPS=1` appends a fingertip one-hot per finger (35 -> 55, observation 188).
-- Joint normalization clamps the joint range to >= 1e-3 rad so ghost joints cannot produce huge or non-finite values.
+- Joint normalization guards zero-width joint ranges; all other values match what the shipped policies were trained on.
 
 ### Reward Function
 The reward includes:

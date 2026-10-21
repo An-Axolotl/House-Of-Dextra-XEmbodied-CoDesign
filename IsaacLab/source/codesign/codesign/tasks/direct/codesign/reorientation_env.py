@@ -1109,9 +1109,11 @@ def scale(x, lower, upper):
 
 @torch.jit.script
 def unscale(x, lower, upper):
-    # Ghost/removed servos have joint ranges as small as 1e-8 rad; dividing by that turns solver
-    # jitter into huge or non-finite observations. Clamp the range so dead joints map to ~0.
-    return (2.0 * x - upper - lower) / torch.clamp(upper - lower, min=1e-3)
+    # Same values as the original normalization for every non-zero range: the shipped policies were trained
+    # on them (a ghost finger's 1e-8 rad palm joint reads -1). Only a zero-width range is guarded (-> 0).
+    rng = upper - lower
+    safe = torch.where(rng != 0, rng, torch.ones_like(rng))
+    return torch.where(rng != 0, (2.0 * x - upper - lower) / safe, torch.zeros_like(x))
 
 
 @torch.jit.script
