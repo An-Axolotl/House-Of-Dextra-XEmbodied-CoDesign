@@ -6,7 +6,9 @@ The search and runner are verified on CPU by `Main/tests/cpu/`. The IsaacLab cha
 reviewed but have not run in simulation yet; the GPU tests below cover that.
 
 Scores from this branch are not comparable with older runs: each episode used to be counted three
-times, and evaluation used to run at DR level 0 instead of the intended fixed level 5.
+times, and evaluation used to run at DR level 0 instead of the intended fixed level 5. The shipped
+checkpoints are unaffected: with fingertip conditioning off (the default) they receive exactly the
+inputs they were trained on.
 
 ## Setup (GPU machine)
 
@@ -26,6 +28,52 @@ python Generation/converters/verify_generation_deps.py
 ls IsaacLab/logs/rl_games/cd_hand_direct/*/nn/cd_hand_direct.pth          # group checkpoints present
 ```
 
+## Minimum check before merging (about 30 to 45 min of GPU time)
+
+Run after the setup above.
+
+1. The CPU suite (section 1 below).
+2. M1 below: the same sym3 hand evaluated on main and on this branch. It catches a crash in the
+   environment changes, confirms the episode-count fix, and confirms an old policy still behaves the
+   same (sym3 hands have ghost fingers, the case most sensitive to input changes).
+3. G4: a two-iteration run through the real build, convert and evaluate pipeline.
+
+If all three pass, merge. The rest of section 2 matters before relying on GHS results; G9 is the test
+that shows the search improves designs in simulation.
+
+### M1. Main versus branch on a sym3 hand
+
+```bash
+cd "$REPO_ROOT"; T=$REPO_ROOT/Main/ghs_tests/m1
+bash Generation/converters/batch_build_rand_hands2.sh -o "$T" --mode manual -C "230,40,310,," \
+  --placement-mode symmetric --palm-radius 0.06 --symmetric-start-deg 0 --symmetric-jitter-deg 0 \
+  --slot-count 36 --min-sep-slots 4 --seed 10
+(cd IsaacLab && "$CODESIGN_ISAAC_PYTHON" source/codesign/codesign/utils/convert_urdf_usd.py \
+  --in-dir "$T" --out-dir "$T" --merge-joints --headless)
+HAND=$(ls "$T"/*/*.usd | head -1)                       # ..._f4_f5_tsssxx.usd
+git worktree add ../hod-main origin/main
+for side in branch main; do
+  root=$REPO_ROOT; [ "$side" = main ] && root=$(cd "$REPO_ROOT/../hod-main" && pwd)
+  ( cd "$root/IsaacLab" && unset CODESIGN_FIXED_DR_LEVEL &&
+    export PYTHONPATH="$root/IsaacLab/source/codesign:$root/IsaacLab:$PYTHONPATH" \
+           CODESIGN_HAND_USD_PATH_0="$HAND" CODESIGN_HAND_GROUP=sym3 CODESIGN_JOINT_PRESET=symmetric &&
+    "$CODESIGN_ISAAC_PYTHON" -c 'import codesign; print("codesign from", codesign.__file__)' &&
+    "$CODESIGN_ISAAC_PYTHON" scripts/rl_games/play.py --task=Codesign-Reorientation-Direct-v0 --headless \
+      --num_envs=256 --checkpoint=logs/rl_games/cd_hand_direct/group4_4096envs/nn/cd_hand_direct.pth \
+      --max_episodes=1 --timeout=1800 --use_unexported --metrics_out "$REPO_ROOT/Main/ghs_tests/m1_$side.jsonl"
+  ) > "$REPO_ROOT/Main/ghs_tests/m1_$side.log" 2>&1
+done
+grep "codesign from" Main/ghs_tests/m1_*.log                # each side must import its own checkout
+python Main/tests/gpu/check_metrics.py Main/ghs_tests/m1_branch.jsonl
+python Main/tests/gpu/check_metrics.py Main/ghs_tests/m1_main.jsonl   # flags episodes = 3x envs: expected on main
+```
+
+Pass:
+- the branch passes `check_metrics.py`: episodes equal envs, not truncated, no unstable designs;
+- main shows episodes equal to 3x envs (the old triple count);
+- `omega` (rotation speed) is about the same on both, within roughly 15%: same policy, same inputs;
+- `avg_rew` on the branch is about 3x main's: the counting fix.
+
 ## 1. CPU suite (any machine, a few minutes)
 
 ```bash
@@ -36,7 +84,7 @@ python Main/tests/cpu/test_improvement.py 6 8 8 2      # search vs random, quick
 Every test should pass. They run the real search and runner against fake build, convert and play
 tools with a synthetic reward, so they check logic, not physics.
 
-## 2. GPU tests
+## 2. Full GPU test plan
 
 | Test | Checks | Cost |
 |---|---|---|
@@ -51,7 +99,7 @@ tools with a synthetic reward, so they check logic, not physics.
 | G9 | Search beats random design sampling at equal budget | hours |
 | G10 | Optional: fingertip-conditioned training starts | under 1 h |
 
-Run them in order. Stop and report if one fails.
+Run them in order after the minimum check. Stop and report if one fails.
 
 ### G1. Build and naming
 
@@ -111,7 +159,7 @@ match the observation size with fingertip conditioning on.
 
 ```bash
 cd "$REPO_ROOT/Main"
-python ghs_runner.py --iterations 2 --candidates 6 --eval-envs 256 --eval-timeout 1800 --eval-groups sym5 \
+python ghs_runner.py --iterations 2 --candidates 6 --eval-envs 256 --eval-timeout 1800 --eval-groups sym3 \
   --no-shuffle-groups --batch-size 6 --seed 0 --output-dir ghs_tests/g4_smoke 2>&1 | tee ghs_tests/g4_smoke.log
 python tests/gpu/check_metrics.py ghs_tests/g4_smoke
 python tests/gpu/summarize_runs.py ghs_tests/g4_smoke
@@ -209,6 +257,7 @@ Logs go to `./logs/rl_games/`.
 
 ## What to send back
 
+- For the minimum check: the CPU results, both `check_metrics.py` outputs from M1, and the G4 summary.
 - PASS or FAIL for each CPU test.
 - The `check_metrics.py` output from G2, plus the G2 main comparison if you ran it.
 - The G5 timing lines and `wall=`.

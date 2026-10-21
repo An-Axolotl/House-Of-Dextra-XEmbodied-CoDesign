@@ -51,7 +51,7 @@ for path in paths:
             print("   FAIL evaluation truncated by --timeout: raise --eval-timeout"); fails += 1
     if not hand:
         print("   FAIL no per-hand metrics"); fails += 1; continue
-    print(f"   {'design':58s} {'envs':>5s} {'eps':>5s} {'norm_rew':>9s} {'omega':>7s} {'success':>8s} {'unstable':>8s}")
+    print(f"   {'design':58s} {'envs':>5s} {'eps':>5s} {'avg_rew':>10s} {'norm_rew':>9s} {'omega':>7s} {'success':>8s} {'unstable':>8s}")
     for did, m in sorted(hand.items()):
         envs, eps = m.get("env_count"), m.get("total_episodes")
         unstable = m.get("unstable_episode_fraction")
@@ -67,7 +67,7 @@ for path in paths:
             flags.append(f"WARN unstable {unstable:.0%}")
         fails += sum(f.startswith("FAIL") for f in flags); warns += sum(f.startswith("WARN") for f in flags)
         fmt = lambda v, n: f"{v:{n}.3f}" if finite(v) else f"{str(v):>{n}s}"
-        print(f"   {did[:58]:58s} {str(envs):>5s} {str(eps):>5s} {fmt(m.get('norm_reward'), 9)} {fmt(m.get('omega_score'), 7)}"
+        print(f"   {did[:58]:58s} {str(envs):>5s} {str(eps):>5s} {fmt(m.get('average_reward'), 10)} {fmt(m.get('norm_reward'), 9)} {fmt(m.get('omega_score'), 7)}"
               f" {fmt(m.get('success_rate'), 8)} {fmt(unstable, 8)}  {'; '.join(flags)}")
 print(f"\n{len(paths)} file(s): {fails} FAIL, {warns} WARN")
 sys.exit(1 if fails else 0)
