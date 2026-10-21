@@ -2,3 +2,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 .DS_Store
+
+# run outputs
+Main/ghs_tests/
+Main/ghs_outputs/
+Main/ghs_rotation_optimization/
+Main/ghs_checkpoints/

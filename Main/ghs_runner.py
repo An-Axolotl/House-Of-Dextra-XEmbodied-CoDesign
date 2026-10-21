@@ -73,6 +73,46 @@ def parse_eval_groups(raw: str) -> List[HandGroup]:
     return out
 
 
+def _prepend_env_path(env: Dict[str, str], key: str, *entries: str) -> None:
+    """Prepend entries to a path-like variable in `env`, dropping empties and duplicates."""
+    parts, seen = [], set()
+    for entry in [*entries, *env.get(key, "").split(os.pathsep)]:
+        if entry and entry not in seen:
+            seen.add(entry)
+            parts.append(entry)
+    if parts:
+        env[key] = os.pathsep.join(parts)
+
+
+def build_subprocess_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Environment for the build / URDF->USD / play.py subprocesses."""
+    env = dict(os.environ if base is None else base)
+    # remove conda + cuda-toolkit stubs from the search path
+    for k in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "_CE_CONDA", "_CE_M",
+              "MAMBA_DEFAULT_ENV", "MAMBA_ROOT_PREFIX", "CUDA_HOME", "CUDA_PATH"):
+        env.pop(k, None)
+    # put driver lib dirs first; keep existing LD_LIBRARY_PATH after
+    driver_libs = ["/usr/lib/x86_64-linux-gnu", "/usr/local/nvidia/lib64"]
+    existing = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = ":".join([*driver_libs, existing]) if existing else ":".join(driver_libs)
+    # torchvision warning is harmless, but silence the extension load attempt
+    env["TORCHVISION_DISABLE_IMAGE"] = "1"
+    # strongly pin the real driver to avoid stubs being picked first (the converter drops this again)
+    env["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+    return env
+
+
+def add_isaaclab_pythonpath(env: Dict[str, str], play_script: str) -> None:
+    """Make the IsaacLab checkout that owns `play_script` (and its codesign package) importable."""
+    try:
+        play_script_path = Path(play_script).resolve()
+        if len(play_script_path.parents) >= 3:
+            isaaclab_root = play_script_path.parents[2]
+            _prepend_env_path(env, "PYTHONPATH", str(isaaclab_root), str(isaaclab_root / "source" / "codesign"))
+    except Exception as exc:
+        print(f"[WARN] Could not extend PYTHONPATH from play script: {exc}")
+
+
 def _canonicalize_with_effective_metadata(design: DesignGraph) -> DesignGraph:
     """Canonicalize a design while preserving effective/evaluated annotations."""
     original = design
@@ -984,7 +1024,8 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=600,
+                # hard kill only well after play.py's own --timeout (sim startup + teardown margin)
+                timeout=self.eval_timeout + 600,
                 cwd=os.getcwd(),
                 env=child_env,
                 label=f"parallel evaluation {iteration_id}",
@@ -1637,39 +1678,7 @@ class CodesignGraphHeuristicSearch(GraphHeuristicSearch):
 
 def main():
     
-    cmd_env = os.environ.copy()
-
-    def prepend_env_path(key: str, *entries: str) -> None:
-        existing = cmd_env.get(key, "")
-        parts = []
-        seen = set()
-
-        for entry in [*entries, *existing.split(os.pathsep)]:
-            if not entry:
-                continue
-            if entry in seen:
-                continue
-            seen.add(entry)
-            parts.append(entry)
-
-        if parts:
-            cmd_env[key] = os.pathsep.join(parts)
-
-    # remove conda + cuda-toolkit stubs from the search path
-    for k in ("CONDA_PREFIX","CONDA_DEFAULT_ENV","_CE_CONDA","_CE_M",
-            "MAMBA_DEFAULT_ENV","MAMBA_ROOT_PREFIX","CUDA_HOME","CUDA_PATH"):
-        cmd_env.pop(k, None)
-
-    # put driver lib dirs first; keep existing LD_LIBRARY_PATH after
-    driver_libs = ["/usr/lib/x86_64-linux-gnu", "/usr/local/nvidia/lib64"]
-    existing = cmd_env.get("LD_LIBRARY_PATH", "")
-    cmd_env["LD_LIBRARY_PATH"] = ":".join([*driver_libs, existing]) if existing else ":".join(driver_libs)
-
-    # torchvision warning is harmless, but you can silence the extension load attempt
-    cmd_env["TORCHVISION_DISABLE_IMAGE"] = "1"
-    
-    # strongly pin the real driver to avoid stubs being picked first
-    cmd_env["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+    cmd_env = build_subprocess_env()
     
     parser = argparse.ArgumentParser(description="Run Graph Heuristic Search for hand design optimization using pre-trained PPO checkpoint")
     parser.add_argument("--iterations", type=int, default=25, help="Number of search iterations")
@@ -1678,6 +1687,9 @@ def main():
                         help="Initial exploration, annealed to 0.05 over the run: Gumbel temperature on standardized "
                              "value predictions (--selection gumbel; 1.0 recommended, 0.4 is too greedy) or "
                              "epsilon-greedy rate (--selection epsilon; 0.4 recommended)")
+    parser.add_argument("--epsilon-final", type=float, default=0.05,
+                        help="Exploration at the last iteration. '--selection epsilon --epsilon 1 --epsilon-final 1' "
+                             "gives a uniform-random-design baseline through the same pipeline")
     parser.add_argument("--selection", type=str, default="gumbel", choices=["gumbel", "epsilon"],
                         help="Successor selection rule during rollouts: 'gumbel' = paper's Gumbel-perturbed argmax, "
                              "'epsilon' = epsilon-greedy")
@@ -1783,17 +1795,7 @@ def main():
         print(f"Error: Build script not found: {args.build_script}")
         return 1
 
-    try:
-        play_script_path = Path(args.play_script).resolve()
-        if len(play_script_path.parents) >= 3:
-            isaaclab_root = play_script_path.parents[2]
-            prepend_env_path(
-                "PYTHONPATH",
-                str(isaaclab_root),
-                str(isaaclab_root / "source" / "codesign"),
-            )
-    except Exception as exc:
-        print(f"[WARN] Could not extend PYTHONPATH from play script: {exc}")
+    add_isaaclab_pythonpath(cmd_env, args.play_script)
 
     try:
         isaac_python = resolve_isaac_python(
@@ -1824,7 +1826,7 @@ def main():
     print(f"Using device: {device}")
     print(f"Isaac Python: {isaac_python}")
     print(f"Optimizing for: {args.focus_metric} (per-hand metric '{CodesignPPOEvaluator.SCORE_KEYS[args.focus_metric]}')")
-    print(f"Successor selection: {args.selection} (exploration {args.epsilon} -> 0.05)")
+    print(f"Successor selection: {args.selection} (exploration {args.epsilon} -> {args.epsilon_final})")
     print(f"Evaluation groups: {', '.join(g.value for g in eval_groups)}")
     print(f"Group reshuffling: {'enabled' if args.shuffle_groups and len(eval_groups) > 1 else 'disabled'}")
     
@@ -1867,6 +1869,7 @@ def main():
         debug=args.debug,
         selection=args.selection,
     )
+    ghs.epsilon_final = args.epsilon_final
     # Periodic GHS checkpoints live inside the run directory (also where the W&B upload looks).
     ghs.checkpoint_dir = os.path.join(args.output_dir, "ghs_checkpoint")
 

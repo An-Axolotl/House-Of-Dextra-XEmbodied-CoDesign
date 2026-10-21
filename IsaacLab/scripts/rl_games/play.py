@@ -780,6 +780,7 @@ def main():
         # come from partial episodes and scale with simulation throughput, not design quality.
         "evaluation_truncated": bool(timed_out and agg_count == 0),
         "steps_completed": int(step_count),
+        "eval_wall_time_s": float(time.time() - run_start_time),   # evaluation loop only (excludes sim startup)
     }
     if timed_out and agg_count == 0:
         print(f"[WARN] evaluation truncated by --timeout after {step_count} steps with no completed episode; "
