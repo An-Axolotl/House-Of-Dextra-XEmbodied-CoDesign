@@ -91,8 +91,25 @@ Use `--hand-assets-dir` when the hand lives outside the default `group4` asset f
 
 When multiple hands are selected, `lego_hand.py` passes all matching USDs to `MultiUsdFileCfg`, and Isaac Lab samples from that list across environments.
 
+## Evaluation Controls (used by `Main/ghs_runner.py`)
+
+`play.py` flags: `--max_episodes N`, `--timeout S` (sets `evaluation_truncated` if it fires before any
+episode ends), `--metrics_out FILE` (also writes the `GHS_*_JSON` lines there), `--use_unexported`.
+
+Environment variables read by the task:
+
+- `CODESIGN_HAND_USD_PATH_<i>`: hand USDs to evaluate in parallel (i from 0).
+- `CODESIGN_HAND_GROUP`, `CODESIGN_JOINT_PRESET`: kinematic family and joint preset.
+- `CODESIGN_GHS_EVALUATION=1`: fixed 60 s episodes, no early termination.
+- `CODESIGN_FIXED_DR_LEVEL=k`, `CODESIGN_DISABLE_ADR_ADAPTATION=1`: pin the ADR level for evaluation.
+- `CODESIGN_MORPH_FINGERTIPS=1`: fingertip type in the morphology vector (35 -> 55 dims; policies must match).
+
+Per-hand metrics: `norm_reward`, `omega_score`, `success_rate`, `total_episodes`,
+`unstable_episode_fraction` (non-finite state or object flung away).
+
 ## Notes
 
+- New assets end with a `_t<letters>` fingertip token (e.g. `..._f5_110_tsssss`); older assets without it still load.
 - `--hand` accepts a hand name, a hand directory, or a direct `.usd` path.
 - `--hands` accepts multiple names, directories, or `.usd` paths.
 - If a selected hand has metadata sidecars, `reorientation_env.py` will load them from:

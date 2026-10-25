@@ -235,6 +235,7 @@ Running the policy on the real hand requires a specific default joint position t
 3. Optional: Object state
 
 Current code will need to be modified to allow for robust observation/action space based on hand design.
+Policies trained with `CODESIGN_MORPH_FINGERTIPS=1` expect 20 extra morphology inputs; match the training setting here.
 
 Also the LEAP Hand Authors chose to use the first part of the frame in [-1, 1] space while the second part is in radians space, so this may have to be changed soon too.
 

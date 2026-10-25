@@ -19,7 +19,11 @@ PLACEMENT_MODE="both"
 EVAL_GROUPS="all"   # "all" or comma-separated subset, e.g. "sym5" or "sym3,sym4,sym5"
 SHUFFLE_GROUPS=1    # 1: reshuffle selected group order each cycle (multi-group only), 0: fixed order
 BATCH_SIZE=32
-EPSILON=0.4
+SELECTION="gumbel"    # gumbel (Gumbel-perturbed argmax, paper) | epsilon (epsilon-greedy)
+EPSILON=1.0           # initial exploration, annealed to 0.05: Gumbel temperature (1.0) or epsilon rate (0.4)
+FOCUS_METRIC="reward" # design score: reward (norm_reward) | rotation (omega_score) | success
+EVAL_TIMEOUT=300      # wall-clock seconds per evaluation; must cover the 60 s simulated episode
+MORPH_FINGERTIPS=0    # 1 = fingertip type in the policy input; only with policies trained with CODESIGN_MORPH_FINGERTIPS=1
 DEBUG=0
 
 # Paths for your actual file locations
@@ -93,7 +97,7 @@ echo "Eval groups: $EVAL_GROUPS"
 if [[ -f "$CODESIGN_ENV_FILE" ]]; then
     echo "Env file: $CODESIGN_ENV_FILE"
 fi
-echo "Expected runtime: ~45 minutes"
+echo "Expected runtime: several hours (each iteration builds $CANDIDATES hands, converts them and runs one $EVAL_ENVS-env evaluation)"
 echo ""
 
 # Verify directory structure
@@ -226,6 +230,7 @@ if [ "${SHUFFLE_GROUPS:-1}" -ne 0 ]; then
 fi
 
 export CODESIGN_FIXED_DR_LEVEL=5
+export CODESIGN_MORPH_FINGERTIPS=$MORPH_FINGERTIPS
 export CODESIGN_DISABLE_ADR_ADAPTATION=1
 export CODESIGN_GHS_EVALUATION=1  # If you also want fixed episode lengths
 
@@ -238,13 +243,15 @@ $PYTHON_PATH ghs_runner.py \
     --wandb \
     --wandb-project codesign-ghs \
     --epsilon $EPSILON \
+    --selection "$SELECTION" \
     --eval-episodes $EVAL_EPISODES \
     --eval-envs $EVAL_ENVS \
+    --eval-timeout $EVAL_TIMEOUT \
     --task "Codesign-Reorientation-Direct-v0" \
     --output-dir "$OUTPUT_DIR" \
     --play-script "$PLAY_SCRIPT" \
     --build-script "$BUILD_SCRIPT" \
-    --focus-metric "rotation" \
+    --focus-metric "$FOCUS_METRIC" \
     --device "auto" \
     --placement-mode "$PLACEMENT_MODE" \
     --eval-groups "$EVAL_GROUPS" \

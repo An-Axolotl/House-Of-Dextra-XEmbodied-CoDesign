@@ -73,6 +73,8 @@ For each finger, the generator can vary:
 - grammar lengths for proximal/distal sections
 - fingertip type (`standard`, `wedged`, `rounded`, `thinner`)
 
+The fingertip choice is recorded in the asset name (`_t<letters>`, see `converters/README.md`).
+
 These discrete choices create a large combinatorial hand family, from short rigid fingers to longer dexterous ones.
 
 ## 6) Ghost Joints and Uniform Kinematic Trees
@@ -84,7 +86,8 @@ IsaacLab training typically expects consistent joint ordering/dimensionality acr
 If a sampled finger uses fewer active servos:
 
 - unused joints remain in the model as ghost/locked joints
-- ghost links are lightweight, often collision-disabled
+- ghost links are lightweight, often collision-disabled (mass 1e-9 kg by default; converter
+  `--tiny-mass`/`--tiny-inertia`; such extreme mass ratios are a suspected source of PhysX instability)
 
 Effect:
 

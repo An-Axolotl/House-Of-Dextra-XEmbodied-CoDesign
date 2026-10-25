@@ -45,11 +45,11 @@ f1_finger1_tip, f2_finger1_tip, f3_finger1_tip, f4_finger1_tip, f5_finger1_tip
 - **Action type**: Relative (can be changed to absolute in config)
 
 ### Observation Space
-- **Size**: 120 (20 joints × 3 history + 20 current actions)
-- **Components**: 
-  - Joint positions (normalized)
-  - Current action targets
-  - History buffer for temporal information
+- **Size**: 168 by default = 3 history steps × 43 (20 normalized joint positions, 20 current targets,
+  3 privileged object position) + 4 object-type one-hot + 35 morphology vector
+- **Morphology vector**: finger presence, per-link servo presence and grammar scale, parsed from the
+  USD file name; `CODESIGN_MORPH_FINGERTIPS=1` appends a fingertip one-hot per finger (35 -> 55, observation 188).
+- Joint normalization guards zero-width joint ranges; all other values match what the shipped policies were trained on.
 
 ### Reward Function
 The reward includes:
@@ -66,6 +66,10 @@ Episodes terminate when:
 - Object falls out of hand (distance > fall_dist)
 - Object is flipped (z-axis misalignment)
 - Maximum episode length is reached
+
+With `CODESIGN_GHS_EVALUATION=1` early termination is off and every episode lasts `fixed_eval_time_s`
+(60 s). Episodes are counted once, in `_reset_idx`; envs with non-finite state or an object flung > 2 m
+away are reported per design as `unstable_episode_fraction` rather than poisoning the averages.
 
 ## Usage
 
@@ -87,7 +91,7 @@ The environment can be used with the existing RL Games PPO configuration in `age
 Key configuration parameters in `reorientation_env_cfg.py`:
 
 - `action_space`: 20 (number of joints)
-- `observation_space`: 120 (joint history + actions)
+- `observation_space`: 168 (see above; 188 with fingertip conditioning)
 - `actuated_joint_names`: List of 20 joint names
 - `fingertip_body_names`: List of 5 fingertip names
 - `z_rotation_steps`: 16 (number of rotation steps for full 360°)
@@ -97,6 +101,7 @@ Key configuration parameters in `reorientation_env_cfg.py`:
 ## Notes
 
 - The environment uses the custom hand configuration from `cd_hand.py`
-- Domain randomization is configured but ADR (Adaptive Domain Randomization) is not enabled
+- ADR (Adaptive Domain Randomization) is enabled; `CODESIGN_FIXED_DR_LEVEL` pins the level for
+  evaluation and `CODESIGN_DISABLE_ADR_ADAPTATION=1` stops it from changing mid-run
 - The environment is designed for the DexCube object but can be modified for other objects
 - Default joint positions are set to zeros but can be adjusted based on the hand's natural pose 

@@ -629,6 +629,19 @@ build_one_hand() {
       hand_name="${hand_name}_f${i}"  # Just f1, f2, etc. for ghost fingers
     fi
   done
+  # Fingertip token, one letter per slot: s/w/r/t = standard/wedged/rounded/thinner, x = ghost.
+  # The simulator parses hand morphology from the USD file name, so the tip type must be in it
+  # (see IsaacLab/.../utils/morph_vector.py). The token never matches the "f<i>_<digits>" pattern.
+  local tip_token=""
+  for i in 1 2 3 4 5; do
+    local code="${final_codes[$((i-1))]}"
+    if [[ "$code" == "000" ]] || ((i > actual_finger_count)); then
+      tip_token="${tip_token}x"
+    else
+      tip_token="${tip_token}${hand_fingertip_types[$((i-1))]:0:1}"
+    fi
+  done
+  hand_name="${hand_name}_t${tip_token}"
   
   local vroot="${BUILD_DIR}/${hand_name}"
   local vurdf="${OUT_DIR}/${hand_name}.urdf"

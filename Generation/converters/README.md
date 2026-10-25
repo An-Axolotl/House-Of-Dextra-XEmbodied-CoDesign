@@ -105,6 +105,17 @@ Basic modes:
   -C "530,200,900,670,440"
 ```
 
+Output naming:
+
+```text
+hand_f1_<tok>_f2_<tok>_f3_<tok>_f4_<tok>_f5_<tok>_t<tips>.urdf
+```
+
+- `<tok>`: per-finger code, servo count implied by length (`g1g20` = 3 servos, `g20` = 2, empty = ghost).
+- `_t<tips>`: one letter per slot, `s`/`w`/`r`/`t` = standard/wedged/rounded/thinner, `x` = ghost.
+
+The simulator parses morphology from this file name, so keep it through URDF->USD conversion.
+
 Frequently used presets:
 
 ```bash
@@ -125,23 +136,23 @@ Frequently used presets:
 Manual examples used for Sim2Real assets:
 
 ```bash
-# hand_f1_220_f2_220_f3_f4_f5.urdf (three-finger, all standard tips)
+# hand_f1_220_f2_220_f3_f4_f5_tsssxx.urdf (three-finger, all standard tips; the _t token encodes per-slot fingertips, x = ghost)
 ./converters/batch_build_rand_hands2.sh --mode manual -C "220,220,,," \
   --fingertip-type standard --save-xml -o sets/manual
 
-# hand_f1_330_f2_330_f3_330_f4_f5.urdf (five-finger, all standard tips)
+# hand_f1_330_f2_330_f3_330_f4_f5_tsssxx.urdf (three-finger, 3 servos each, all standard tips)
 ./converters/batch_build_rand_hands2.sh --mode manual -C "330,330,330,," \
   --fingertip-type standard --save-xml -o sets/manual
 
-# hand_f1_530_f2_200_f3_900_f4_670_f5_440.urdf (random tips)
+# hand_f1_530_f2_200_f3_900_f4_670_f5_440_t<tips>.urdf (random tips; the token reflects the draw)
 ./converters/batch_build_rand_hands2.sh --mode manual -C "530,200,900,670,440" \
   --fingertip-random --save-xml -o sets/manual
 
-# hand_f1_330_f2_210_f3_080_f4_750_f5.urdf (random tips)
+# hand_f1_330_f2_210_f3_080_f4_750_f5_t<tips>x.urdf (random tips)
 ./converters/batch_build_rand_hands2.sh --mode manual -C "330,210,080,750," \
   --fingertip-random --save-xml -o sets/manual
 
-# hand_f1_640_f2_10_f3_010_f4_80_f5.urdf (random tips)
+# hand_f1_640_f2_10_f3_010_f4_80_f5_t<tips>x.urdf (random tips)
 ./converters/batch_build_rand_hands2.sh --mode manual -C "640,10,010,80," \
   --fingertip-random --save-xml -o sets/manual
 ```

@@ -199,7 +199,17 @@ def main():
     runner.load(agent_cfg)
     # obtain the agent from the runner
     agent: BasePlayer = runner.create_player()
-    agent.restore(resume_path)
+    try:
+        agent.restore(resume_path)
+    except RuntimeError as exc:
+        if "size mismatch" in str(exc):
+            raise RuntimeError(
+                f"Checkpoint '{resume_path}' does not match the environment's observation size "
+                f"(observation_space={env_cfg.observation_space}, MORPH_DIM={env_cfg.MORPH_DIM}, "
+                f"fingertip conditioning {'on' if env_cfg.include_fingertips_in_morph else 'off'}). "
+                "Policies trained with CODESIGN_MORPH_FINGERTIPS=1 must be evaluated with it set, and vice versa."
+            ) from exc
+        raise
     agent.reset()
     
     save_dir = "./jit_exports"  # Update path as needed
@@ -558,6 +568,7 @@ def main():
         
     # BEFORE the loop
     run_start_time = time.time()
+    timed_out = False
 
     agg_count = 0                          # number of finished episodes
     agg_sum = {}                           # sum over numeric metrics
@@ -580,7 +591,7 @@ def main():
             break
         if args_cli.timeout and (time.time() - run_start_time) >= args_cli.timeout:
             print(f"Reached timeout: {time.time() - run_start_time:.1f}s", flush=True)
-            # import sys; sys.exit(2)
+            timed_out = True
             break
         
         with torch.inference_mode():
@@ -611,20 +622,14 @@ def main():
 
                 # only aggregate scalar numeric metrics
                 for k, v in extras_log.items():
-                    if isinstance(v, (int, float)):
+                    if isinstance(v, (int, float)) and math.isfinite(float(v)):
                         val = float(v)
                         agg_sum[k] = agg_sum.get(k, 0.0) + val * n_done
                         agg_min[k] = min(agg_min.get(k, float('inf')), val)
                         agg_max[k] = max(agg_max.get(k, float('-inf')), val)
                         
-                # roll up per-env episode counters into per-design accumulators
-                done_env_ids = torch.nonzero(torch.as_tensor(dones), as_tuple=False).squeeze(-1).to(env.unwrapped.device)
-                if done_env_ids.numel() > 0 and hasattr(env, "env") and hasattr(env.env, "unwrapped"):
-                    try:
-                        env.env.unwrapped._rollup_done_episodes(done_env_ids)
-                    except Exception as e:
-                        print(f"[warn] rollup failed: {e}")
-
+                # Per-design episode accumulators are rolled up by the env itself in _reset_idx()
+                # when an episode ends; rolling them up here as well double-counted every episode.
                 agg_count += n_done
                 episode_count += n_done   # <-- make max_episodes work
 
@@ -659,7 +664,8 @@ def main():
         if unwrapped is not None and hasattr(unwrapped, "extras") and "log" in unwrapped.extras:
             raw = unwrapped.extras["log"]
             tmp = {k: py_cast(v) for k, v in raw.items()}
-            final_avg = {k: float(v) for k, v in tmp.items() if isinstance(v, (int, float))}
+            # drop NaN/inf so the final JSON dump (allow_nan=False) cannot crash the evaluation
+            final_avg = {k: float(v) for k, v in tmp.items() if isinstance(v, (int, float)) and math.isfinite(float(v))}
 
     # Fallback to your counters only if you truly built per-episode sums yourself
     if not final_avg and agg_sum:
@@ -770,7 +776,15 @@ def main():
         "turns_per_minute": float(overall_rps * 60.0),
         "hand_design_metrics": hand_metrics_summary,
         "num_hand_designs": len(hand_metrics_summary),
+        # True when --timeout fired before a single episode finished: the per-hand numbers then
+        # come from partial episodes and scale with simulation throughput, not design quality.
+        "evaluation_truncated": bool(timed_out and agg_count == 0),
+        "steps_completed": int(step_count),
+        "eval_wall_time_s": float(time.time() - run_start_time),   # evaluation loop only (excludes sim startup)
     }
+    if timed_out and agg_count == 0:
+        print(f"[WARN] evaluation truncated by --timeout after {step_count} steps with no completed episode; "
+              f"per-hand metrics are partial-episode values", flush=True)
 
     _emit_metrics("GHS_METRICS_JSON_FINAL " + json.dumps(final_payload, separators=(",", ":"), allow_nan=False))
     

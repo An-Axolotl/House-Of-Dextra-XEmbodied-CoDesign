@@ -73,6 +73,46 @@ def parse_eval_groups(raw: str) -> List[HandGroup]:
     return out
 
 
+def _prepend_env_path(env: Dict[str, str], key: str, *entries: str) -> None:
+    """Prepend entries to a path-like variable in `env`, dropping empties and duplicates."""
+    parts, seen = [], set()
+    for entry in [*entries, *env.get(key, "").split(os.pathsep)]:
+        if entry and entry not in seen:
+            seen.add(entry)
+            parts.append(entry)
+    if parts:
+        env[key] = os.pathsep.join(parts)
+
+
+def build_subprocess_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Environment for the build / URDF->USD / play.py subprocesses."""
+    env = dict(os.environ if base is None else base)
+    # remove conda + cuda-toolkit stubs from the search path
+    for k in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "_CE_CONDA", "_CE_M",
+              "MAMBA_DEFAULT_ENV", "MAMBA_ROOT_PREFIX", "CUDA_HOME", "CUDA_PATH"):
+        env.pop(k, None)
+    # put driver lib dirs first; keep existing LD_LIBRARY_PATH after
+    driver_libs = ["/usr/lib/x86_64-linux-gnu", "/usr/local/nvidia/lib64"]
+    existing = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = ":".join([*driver_libs, existing]) if existing else ":".join(driver_libs)
+    # torchvision warning is harmless, but silence the extension load attempt
+    env["TORCHVISION_DISABLE_IMAGE"] = "1"
+    # strongly pin the real driver to avoid stubs being picked first (the converter drops this again)
+    env["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+    return env
+
+
+def add_isaaclab_pythonpath(env: Dict[str, str], play_script: str) -> None:
+    """Make the IsaacLab checkout that owns `play_script` (and its codesign package) importable."""
+    try:
+        play_script_path = Path(play_script).resolve()
+        if len(play_script_path.parents) >= 3:
+            isaaclab_root = play_script_path.parents[2]
+            _prepend_env_path(env, "PYTHONPATH", str(isaaclab_root), str(isaaclab_root / "source" / "codesign"))
+    except Exception as exc:
+        print(f"[WARN] Could not extend PYTHONPATH from play script: {exc}")
+
+
 def _canonicalize_with_effective_metadata(design: DesignGraph) -> DesignGraph:
     """Canonicalize a design while preserving effective/evaluated annotations."""
     original = design
@@ -85,10 +125,13 @@ def _canonicalize_with_effective_metadata(design: DesignGraph) -> DesignGraph:
 class CodesignPPOEvaluator(EvaluatorLoggingMixin):
     """
     PPO evaluator that uses your pre-trained checkpoint and play.py script.
-    Focuses on rotation performance metrics.
+    The design score is one of the per-hand metrics play.py emits (see SCORE_KEYS).
     """
-    
-    def __init__(self, 
+
+    # --focus-metric value -> per-hand metric key emitted by play.py / the task env
+    SCORE_KEYS = {"reward": "norm_reward", "rotation": "omega_score", "success": "success_rate"}
+
+    def __init__(self,
                  build_script: str = "../Generation/converters/batch_build_rand_hands2.sh",
                  play_script: str = "../IsaacLab/scripts/rl_games/play.py",
                  output_dir: str = "ghs_outputs",
@@ -104,9 +147,16 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                  video_length: int = 800,
                  seed: Optional[int] = None,
                  eval_groups: Optional[List[HandGroup]] = None,
-                 shuffle_groups: bool = True):
-        
+                 shuffle_groups: bool = True,
+                 score_metric: str = "reward"):
+
         self.debug = debug
+        if score_metric not in self.SCORE_KEYS:
+            raise ValueError(f"score_metric must be one of {sorted(self.SCORE_KEYS)}, got {score_metric!r}")
+        self.score_metric = score_metric
+        self.score_key = self.SCORE_KEYS[score_metric]
+        # Per-hand metrics parsed from the CURRENT evaluation only (reset every iteration).
+        self.last_hand_design_metrics: Dict[int, Dict[str, dict]] = {}
         self.wandb_run = wandb_run
         self.video_every_n_cycles = video_every_n_cycles
         self.video_length = video_length            
@@ -189,10 +239,14 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
         return min(vals) if vals else None
         
     def _current_group(self) -> HandGroup:
-        # reshuffle cycle every N iterations to keep exploration fresh
-        if self._shuffle_groups and self._iter_idx > 0 and (self._iter_idx % self._reshuffle_every == 0):
-            random.shuffle(self._group_cycle)
+        """Group of the current iteration. Pure: the order is only reshuffled in _advance_iteration()."""
         return self._group_cycle[self._iter_idx % self._num_groups]
+
+    def _advance_iteration(self) -> None:
+        """Finish the current iteration; reshuffle the group order once per completed cycle."""
+        self._iter_idx += 1
+        if self._shuffle_groups and (self._iter_idx % self._reshuffle_every == 0):
+            random.shuffle(self._group_cycle)
     
     def finalize_incomplete_cycle(self):
         """Log any remaining cycle data that wasn't logged due to incomplete cycle"""
@@ -214,7 +268,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
             return "../IsaacLab/logs/rl_games/cd_hand_direct/group8_2048envs/nn/cd_hand_direct.pth"
         if g == HandGroup.ANTH33:
             return "../IsaacLab/logs/rl_games/cd_hand_direct/group7_2048envs/nn/cd_hand_direct.pth"
-        return self.checkpoint_path  # fallback
+        raise ValueError(f"No pretrained checkpoint mapped for group {g!r}")
     
     def codes_to_designgraph(
         self,
@@ -250,27 +304,35 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
         return DesignGraph(nodes, edges, terminals, non_terminals, design_string)
 
 
-
     def effective_codes_for(self, design: DesignGraph, group: HandGroup) -> tuple[list[str], str, Optional[int], list[str]]:
         """
         Single source of truth for converting a design to effective codes for a given group.
         Returns (codes, mode, thumb_slot, tips)
         """
         finger_codes_raw = self.design_to_grammar_codes(design)
-        finger_tips = self.design_to_fingertips(design)
+        finger_tips_raw = self.design_to_fingertips(design)
 
-        finger_codes, selected_mode, fixed_thumb_slot = self._force_group_constraints(finger_codes_raw, group)
+        finger_codes, finger_tips, selected_mode, fixed_thumb_slot = self._force_group_constraints(
+            finger_codes_raw, finger_tips_raw, group
+        )
         return finger_codes, selected_mode, fixed_thumb_slot, finger_tips
-    
+
+    @staticmethod
+    def _normalize_ghost_tips(codes: List[str], tips: List[str]) -> List[str]:
+        """Ghost slots have no fingertip; report the default so the effective key only reflects what is built."""
+        return [t if c else "standard" for c, t in zip(codes, tips)]
+
     def _force_group_constraints(
-        self, finger_codes: List[str], g: HandGroup
-    ) -> Tuple[List[str], str, Optional[int]]:
+        self, finger_codes: List[str], finger_tips: List[str], g: HandGroup
+    ) -> Tuple[List[str], List[str], str, Optional[int]]:
         """
-        Returns (adjusted_codes, placement_mode, thumb_slot)
+        Returns (adjusted_codes, adjusted_tips, placement_mode, thumb_slot)
         - For symmetric groups: force exactly 3/4/5 active fingers.
         - For anthro groups: force anthro-top-heavy + fixed thumb slot (21/27/33).
+        Fingertips travel with their finger when codes are reordered.
         """
         codes = finger_codes[:] + [""] * (5 - len(finger_codes))
+        tips = [str(t) for t in finger_tips[:5]] + ["standard"] * (5 - len(finger_tips))
         def active_count(cc): return sum(1 for c in cc if c)
 
         if g in (HandGroup.SYM3, HandGroup.SYM4, HandGroup.SYM5):
@@ -287,7 +349,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                 for i in ghost_idx[:need]:
                     codes[i] = "20"
             # clip length and return symmetric
-            return codes[:5], "symmetric", None
+            return codes[:5], self._normalize_ghost_tips(codes[:5], tips[:5]), "symmetric", None
 
         # Anthro groups: exactly 5 active, last has 3 servos; fixed thumb slot
         thumb_map = {
@@ -313,6 +375,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
         if three_servo_idx is not None and three_servo_idx != 0:
             print(f"DEBUG: Swapping finger {three_servo_idx+1} (3-servo) to position 1 for anthro-top-heavy.")
             codes[0], codes[three_servo_idx] = codes[three_servo_idx], codes[0]
+            tips[0], tips[three_servo_idx] = tips[three_servo_idx], tips[0]
 
         # Now ensure position 0 has 3 servos
         if len(codes[0]) == 2:
@@ -325,7 +388,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
             print("DEBUG: Truncating finger 1 code to 3-servo for anthro-top-heavy.")
             codes[0] = codes[0][:3]
             
-        return codes[:5], "anthro-top-heavy", ts
+        return codes[:5], self._normalize_ghost_tips(codes[:5], tips[:5]), "anthro-top-heavy", ts
 
     
     def design_to_grammar_codes(self, design: DesignGraph, placement_mode: Optional[str] = None) -> List[str]:
@@ -410,10 +473,6 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
             tips.append('standard')
         return tips[:5]
     
-    def _choose_mode_for_design(self, finger_codes: List[str]) -> str:
-        if self.placement_mode == "both":
-            return "anthro-top-heavy" if random.random() < 0.5 else "symmetric"
-        return self.placement_mode
 
     def _build_mode_flags(self, mode: str, active_count: int, thumb_slot: Optional[int] = None) -> List[str]:
         palm_radius = "0.06" if (mode == "symmetric" and active_count == 3) else "0.07"
@@ -711,7 +770,13 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                     
                     if new_urdf_files:
                         new_urdf = list(new_urdf_files)[0]
-                        urdf_path = str(new_urdf)
+                        # The builder names URDFs from finger codes only, so two candidates that
+                        # differ just in fingertip type would overwrite each other in this shared
+                        # batch dir. Give each candidate a unique index-prefixed name; the
+                        # "f<i>_<digits>" tokens the task parses are preserved.
+                        unique_urdf = new_urdf.with_name(f"d{design_idx:03d}_{new_urdf.name}")
+                        new_urdf.replace(unique_urdf)
+                        urdf_path = str(unique_urdf)
                         actual_usd_basename = os.path.splitext(os.path.basename(urdf_path))[0]
                         
                         successful_builds.append((design_idx, urdf_path, design_prefix))
@@ -753,7 +818,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
         # **FAILSAFE 1: Check if we have enough successful builds to continue**
         if num_successful == 0:
             print("❌ No designs built successfully - aborting iteration")
-            self._iter_idx += 1
+            self._advance_iteration()
             return [-1000.0] * len(designs)
 
         # Continue with only successful builds
@@ -818,12 +883,12 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                     print("    Converter stderr:")
                     for line in convert_stderr.strip().splitlines()[-40:]:
                         print(f"      {line}")
-                self._iter_idx += 1
+                self._advance_iteration()
                 return [-1000.0] * len(designs)
             
         except Exception as e:
             print(f"💥 Batch conversion ERROR: {e}")
-            self._iter_idx += 1
+            self._advance_iteration()
             return [-1000.0] * len(designs)
         
         # Step 4: Collect USD files - ONLY for successful builds
@@ -872,7 +937,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                 print("    Converter stderr:")
                 for line in convert_stderr.strip().splitlines()[-40:]:
                     print(f"      {line}")
-            self._iter_idx += 1
+            self._advance_iteration()
             return [-1000.0] * len(designs)
 
         print(f"✓ {valid_usd_count} valid USD files ready for evaluation")
@@ -896,6 +961,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
         # Step 6: Run parallel evaluation
         print(f"\n🎮 Running parallel evaluation with {self.eval_envs} environments...")
 
+        stats_logged = False  # guard: a late exception must not log this iteration twice
         try:
             python_exe = self.isaac_python
             checkpoint_for_group = self._checkpoint_for_group(group)
@@ -958,7 +1024,8 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=600,
+                # hard kill only well after play.py's own --timeout (sim startup + teardown margin)
+                timeout=self.eval_timeout + 600,
                 cwd=os.getcwd(),
                 env=child_env,
                 label=f"parallel evaluation {iteration_id}",
@@ -968,18 +1035,20 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                 print("✓ Parallel evaluation completed successfully")
                 
                 combined = result.stdout or ""
+                # Per-hand metrics must come from THIS evaluation; never reuse a previous iteration's.
+                self.last_hand_design_metrics = {}
                 score = None
                 if os.path.exists(metrics_file) and os.path.getsize(metrics_file) > 0:
                     with open(metrics_file, "r", encoding="utf-8", errors="replace") as f:
                         file_text = f.read()
                     score = self._parse_rotation_performance_with_debugging(file_text, shared_dir, 0)
 
-                if score is None:  # or use `if score is None` if you change parser to return None on “not found”
+                if score is None:
                     score = self._parse_rotation_performance_with_debugging(combined, shared_dir, 0)
-                
-                hand_metrics = {}
-                if hasattr(self, 'last_hand_design_metrics') and 0 in self.last_hand_design_metrics:
-                    hand_metrics = self.last_hand_design_metrics[0]
+
+                hand_metrics = self.last_hand_design_metrics.get(0, {})
+                if score is not None and not hand_metrics:
+                    print("⚠️ play.py emitted an overall score but no per-hand metrics")
                 
                 if hand_metrics:
                     print(f"✓ Successfully parsed metrics for {len(hand_metrics)} hand designs")
@@ -1008,7 +1077,10 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                         for design_id, metrics in hand_metrics.items():
                             if design_id == actual_usd_basename:
                                 matched = True
-                                nr = metrics.get("norm_reward", None)
+                                nr = metrics.get(self.score_key, None)
+                                if nr is None and self.score_key != "norm_reward":
+                                    print(f"  [score] '{self.score_key}' missing for {design_id}; falling back to norm_reward")
+                                    nr = metrics.get("norm_reward", None)
                                 if nr is not None:
                                     design_score = float(nr)
                                 else:
@@ -1056,9 +1128,12 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                                         metrics.get("average_reward", 0.0)
                                     ),
                                     "total_episodes": metrics.get("total_episodes", 0),
+                                    "unstable_episode_fraction": metrics.get("unstable_episode_fraction", 0.0),
                                 }
                                 
-                                print(f"  Design {design_idx+1} → {actual_usd_basename}: score={design_score:.3f}")
+                                unstable = float(metrics.get("unstable_episode_fraction", 0.0) or 0.0)
+                                flag = f"  ⚠️ unstable in {unstable:.0%} of episodes (NaN/flung object)" if unstable > 0 else ""
+                                print(f"  Design {design_idx+1} → {actual_usd_basename}: score={design_score:.3f}{flag}")
                                 break
                         
                         if not matched:
@@ -1158,7 +1233,8 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                         worst_score_so_far=self.global_worst_score,
                         worst_reward_so_far=self.global_worst_reward,
                     )
-                    
+                    stats_logged = True
+
                     if is_last_iteration_of_cycle:
                         self._log_cycle_stats(current_cycle)
 
@@ -1175,86 +1251,61 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                         design_to_env_var=design_idx_to_env_idx,
                         shared_dir=shared_dir
                     )
-                    self._iter_idx += 1
+                    self._advance_iteration()
                             
                     return scores
 
                 # Keep the search alive even if evaluation exited cleanly but failed to
                 # emit any metrics due to asset/runtime issues.
-                self._log_iteration_stats(
-                    iteration_idx=self._iter_idx,
-                    iteration_id=iteration_id,
-                    group=group,
-                    avg_score=None,
-                    avg_reward=None,
-                    n_candidates=len(designs),
-                    best_score_of_iter=None,
-                    best_reward_of_iter=None,
-                    best_score_so_far=self.global_best_score,
-                    best_reward_so_far=self.global_best_reward,
-                    worst_score_of_iter=None,
-                    worst_reward_of_iter=None,
-                    worst_score_so_far=self.global_worst_score,
-                    worst_reward_so_far=self.global_worst_reward,
-                )
+                stats_logged = self._log_failed_iteration(iteration_id, group, len(designs), stats_logged)
 
                 parse_log_file = os.path.join(shared_dir, "episode_0_parse_log.txt")
                 print("⚠️ Parallel evaluation finished without emitting per-hand metrics; using sentinel scores -1000.0")
                 if os.path.exists(parse_log_file):
                     print(f"   Parser details: {parse_log_file}")
-                self._iter_idx += 1
+                self._advance_iteration()
                 return [-1000.0] * len(designs)
             else:
                 # Persist a failure iteration entry so plots keep x-axis contiguous
-                self._log_iteration_stats(
-                    iteration_idx=self._iter_idx,
-                    iteration_id=iteration_id,
-                    group=group,
-                    avg_score=None,
-                    avg_reward=None,
-                    n_candidates=len(designs),
-                    best_score_of_iter=None,
-                    best_reward_of_iter=None,
-                    best_score_so_far=self.global_best_score,
-                    best_reward_so_far=self.global_best_reward,
-                    worst_score_of_iter=None,
-                    worst_reward_of_iter=None,
-                    worst_score_so_far=self.global_worst_score,
-                    worst_reward_so_far=self.global_worst_reward,
-                )
+                stats_logged = self._log_failed_iteration(iteration_id, group, len(designs), stats_logged)
 
                 print(f"❌ Parallel evaluation FAILED (return code {result.returncode})")
-                # Show tails so the logs are useful but not huge
-                print(f"STDOUT (tail): {result.stdout[-1000:]}")
-                print(f"STDERR (tail): {result.stderr[-2000:]}")
+                # stderr is merged into stdout for this subprocess; show one tail so logs stay useful.
+                print(f"OUTPUT (tail): {(result.stdout or '')[-3000:]}")
                 # Return sentinel scores so the search can proceed
-                self._iter_idx += 1
+                self._advance_iteration()
                 return [-1000.0] * len(designs)
                 
         except Exception as e:
             # Persist a failure iteration entry so plots keep x-axis contiguous
-            self._log_iteration_stats(
-                iteration_idx=self._iter_idx,
-                iteration_id=iteration_id,
-                group=group,
-                avg_score=None,
-                avg_reward=None,
-                n_candidates=len(designs),
-                best_score_of_iter=None,
-                best_reward_of_iter=None,
-                best_score_so_far=self.global_best_score,
-                best_reward_so_far=self.global_best_reward,
-                worst_score_of_iter=None,
-                worst_reward_of_iter=None,
-                worst_score_so_far=self.global_worst_score,
-                worst_reward_so_far=self.global_worst_reward,
-            )
-
+            stats_logged = self._log_failed_iteration(iteration_id, group, len(designs), stats_logged)
 
             print(f"💥 Parallel evaluation ERROR: {e}")
-            self._iter_idx += 1
+            self._advance_iteration()
             return [-1000.0] * len(designs)
         
+    def _log_failed_iteration(self, iteration_id: str, group: HandGroup, n_candidates: int, already_logged: bool) -> bool:
+        """Persist one failure row for this iteration so plots keep the x-axis contiguous."""
+        if already_logged:
+            return True
+        self._log_iteration_stats(
+            iteration_idx=self._iter_idx,
+            iteration_id=iteration_id,
+            group=group,
+            avg_score=None,
+            avg_reward=None,
+            n_candidates=n_candidates,
+            best_score_of_iter=None,
+            best_reward_of_iter=None,
+            best_score_so_far=self.global_best_score,
+            best_reward_so_far=self.global_best_reward,
+            worst_score_of_iter=None,
+            worst_reward_of_iter=None,
+            worst_score_so_far=self.global_worst_score,
+            worst_reward_so_far=self.global_worst_reward,
+        )
+        return True
+
     def _copy_assets_for_design(self, candidate_roots, dest_root, design_id):
         """
         Copy meshes/ and robot_meshes/ for a design into:
@@ -1287,7 +1338,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
             writer.writerow([
                 "iteration_id","design_idx","raw_design_string","effective_design_key","effective_group", "design_string","codes", "placement_mode", "training_score",
                 "raw_omega_z_rad_per_sec","raw_omega_z_deg_per_sec","raw_omega_z_rpm","rps_from_omega","turns_per_second",
-                "step_fraction_evaluated","average_reward","total_episodes",
+                "step_fraction_evaluated","average_reward","total_episodes","unstable_episode_fraction",
                 "urdf_path","usd_path","usd_basename","env_var_index",
             ])
             for di in range(len(designs)):
@@ -1313,6 +1364,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                     raw.get("step_fraction_evaluated", ""),
                     raw.get("average_reward", ""),
                     raw.get("total_episodes", ""),
+                    raw.get("unstable_episode_fraction", ""),
                     urdf_by_idx.get(di, ""),
                     usd_paths[di] or "",
                     design_to_actual_usd.get(di, ""),
@@ -1356,8 +1408,9 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                     design_to_env_var.get(di, ""),
                 ])
     
-    def _parse_rotation_performance_with_debugging(self, stdout: str, debug_dir: str, episode: int, stderr: str = "") -> float:
-        """Parse rotation performance with enhanced debugging and file output"""
+    def _parse_rotation_performance_with_debugging(self, stdout: str, debug_dir: str, episode: int, stderr: str = "") -> Optional[float]:
+        """Parse the overall score (and stash per-hand metrics in self.last_hand_design_metrics).
+        Returns None when no GHS_METRICS_JSON* payload could be parsed."""
         prefix_final = "GHS_METRICS_JSON_FINAL "
         prefix_last = "GHS_METRICS_JSON "
         prefix_hand_metrics = "GHS_HAND_METRICS_JSON "  # New: for hand-specific metrics
@@ -1480,7 +1533,7 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                         f.write(f"{i}: {line}\n")
                 
                 print(f"    [parser] Analysis saved to: {parse_log_file}")
-                return 0.0
+                return None
 
         # Clean up the JSON string
         js = re.sub(r'\bNaN\b', 'null', js)
@@ -1491,11 +1544,15 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
             print(f"    [parser] Successfully parsed JSON payload", flush=True)
         except Exception as e:
             print(f"    [parser] JSON load failed. Raw js excerpt:\n    {js[:400]}...\n    Error: {e}", flush=True)
-            return 0.0
+            return None
 
         # Extract metrics from payload - handle both old and new formats
         metrics = payload.get("avg_metrics") or payload.get("metrics") or {}
         score = payload.get("score")
+        if payload.get("evaluation_truncated"):
+            print(f"    ⚠️ [parser] play.py hit its wall-clock --timeout before any episode finished "
+                  f"(steps_completed={payload.get('steps_completed')}); per-hand scores are partial-episode "
+                  f"values that scale with sim throughput. Raise --eval-timeout.", flush=True)
         
         print(f"    [parser] Payload keys: {list(payload.keys())}", flush=True)
         print(f"    [parser] Metrics keys: {list(metrics.keys()) if metrics else 'None'}", flush=True)
@@ -1524,8 +1581,8 @@ class CodesignPPOEvaluator(EvaluatorLoggingMixin):
                     print(f"    [parser] Using norm_reward: {v}", flush=True)
                     return v
 
-        print("    [parser] No suitable score found, returning 0.0", flush=True)
-        return 0.0
+        print("    [parser] No suitable score found in payload", flush=True)
+        return None
 
 class CodesignGraphHeuristicSearch(GraphHeuristicSearch):
     """
@@ -1578,7 +1635,7 @@ class CodesignGraphHeuristicSearch(GraphHeuristicSearch):
 
         # Save lookup table for analysis (JSON-safe: expand tuple keys)
         lt_export = [
-            {"design_string": k[0], "group": k[1], "value": float(v)}
+            {"design_string": k[0], "group": k[1], "value": float(v), "partial_state": k[0].startswith("partial:")}
             for k, v in self.lookup_table.items()
         ]
         with open(os.path.join(save_dir, "lookup_table.json"), 'w') as f:
@@ -1588,6 +1645,8 @@ class CodesignGraphHeuristicSearch(GraphHeuristicSearch):
         csv_path = os.path.join(save_dir, "rewards.csv")
         rows = {}
         for d in self.seen_designs:
+            if str(getattr(d, "_value_key", "")).startswith("partial:"):
+                continue  # partial search states are not physical hands
             dkey = getattr(d, "_effective_key", d.design_string)
             if dkey in rows:
                 continue
@@ -1619,44 +1678,21 @@ class CodesignGraphHeuristicSearch(GraphHeuristicSearch):
 
 def main():
     
-    cmd_env = os.environ.copy()
-
-    def prepend_env_path(key: str, *entries: str) -> None:
-        existing = cmd_env.get(key, "")
-        parts = []
-        seen = set()
-
-        for entry in [*entries, *existing.split(os.pathsep)]:
-            if not entry:
-                continue
-            if entry in seen:
-                continue
-            seen.add(entry)
-            parts.append(entry)
-
-        if parts:
-            cmd_env[key] = os.pathsep.join(parts)
-
-    # remove conda + cuda-toolkit stubs from the search path
-    for k in ("CONDA_PREFIX","CONDA_DEFAULT_ENV","_CE_CONDA","_CE_M",
-            "MAMBA_DEFAULT_ENV","MAMBA_ROOT_PREFIX","CUDA_HOME","CUDA_PATH"):
-        cmd_env.pop(k, None)
-
-    # put driver lib dirs first; keep existing LD_LIBRARY_PATH after
-    driver_libs = ["/usr/lib/x86_64-linux-gnu", "/usr/local/nvidia/lib64"]
-    existing = cmd_env.get("LD_LIBRARY_PATH", "")
-    cmd_env["LD_LIBRARY_PATH"] = ":".join([*driver_libs, existing]) if existing else ":".join(driver_libs)
-
-    # torchvision warning is harmless, but you can silence the extension load attempt
-    cmd_env["TORCHVISION_DISABLE_IMAGE"] = "1"
-    
-    # strongly pin the real driver to avoid stubs being picked first
-    cmd_env["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+    cmd_env = build_subprocess_env()
     
     parser = argparse.ArgumentParser(description="Run Graph Heuristic Search for hand design optimization using pre-trained PPO checkpoint")
     parser.add_argument("--iterations", type=int, default=25, help="Number of search iterations")
     parser.add_argument("--candidates", type=int, default=6, help="Number of candidate designs per iteration")
-    parser.add_argument("--epsilon", type=float, default=0.2, help="Epsilon for epsilon-greedy selection")
+    parser.add_argument("--epsilon", type=float, default=1.0,
+                        help="Initial exploration, annealed to 0.05 over the run: Gumbel temperature on standardized "
+                             "value predictions (--selection gumbel; 1.0 recommended, 0.4 is too greedy) or "
+                             "epsilon-greedy rate (--selection epsilon; 0.4 recommended)")
+    parser.add_argument("--epsilon-final", type=float, default=0.05,
+                        help="Exploration at the last iteration. '--selection epsilon --epsilon 1 --epsilon-final 1' "
+                             "gives a uniform-random-design baseline through the same pipeline")
+    parser.add_argument("--selection", type=str, default="gumbel", choices=["gumbel", "epsilon"],
+                        help="Successor selection rule during rollouts: 'gumbel' = paper's Gumbel-perturbed argmax, "
+                             "'epsilon' = epsilon-greedy")
     parser.add_argument("--eval-episodes", type=int, default=2, help="Number of evaluation episodes per design")
     parser.add_argument("--eval-envs", type=int, default=16, help="Number of environments for evaluation")
     parser.add_argument("--task", type=str, default="Codesign-Reorientation-Direct-v0", help="Base task name")
@@ -1713,7 +1749,14 @@ def main():
     parser.add_argument("--video-length", type=int, default=800, 
                     help="Length of recorded videos in steps")
     
-    parser.add_argument("--eval-timeout", type=int, default=40, help="Evaluation timeout in seconds")
+    parser.add_argument(
+        "--eval-timeout", type=int, default=300,
+        help=(
+            "Wall-clock budget in seconds for one play.py evaluation loop. It must cover the fixed "
+            "60 s simulated episode across all --eval-envs; if it fires first, scores come from "
+            "truncated episodes (play.py flags this as evaluation_truncated)."
+        ),
+    )
 
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
 
@@ -1752,17 +1795,7 @@ def main():
         print(f"Error: Build script not found: {args.build_script}")
         return 1
 
-    try:
-        play_script_path = Path(args.play_script).resolve()
-        if len(play_script_path.parents) >= 3:
-            isaaclab_root = play_script_path.parents[2]
-            prepend_env_path(
-                "PYTHONPATH",
-                str(isaaclab_root),
-                str(isaaclab_root / "source" / "codesign"),
-            )
-    except Exception as exc:
-        print(f"[WARN] Could not extend PYTHONPATH from play script: {exc}")
+    add_isaaclab_pythonpath(cmd_env, args.play_script)
 
     try:
         isaac_python = resolve_isaac_python(
@@ -1792,7 +1825,8 @@ def main():
     
     print(f"Using device: {device}")
     print(f"Isaac Python: {isaac_python}")
-    print(f"Optimizing for: {args.focus_metric}")
+    print(f"Optimizing for: {args.focus_metric} (per-hand metric '{CodesignPPOEvaluator.SCORE_KEYS[args.focus_metric]}')")
+    print(f"Successor selection: {args.selection} (exploration {args.epsilon} -> {args.epsilon_final})")
     print(f"Evaluation groups: {', '.join(g.value for g in eval_groups)}")
     print(f"Group reshuffling: {'enabled' if args.shuffle_groups and len(eval_groups) > 1 else 'disabled'}")
     
@@ -1833,8 +1867,12 @@ def main():
         opt_iterations=200,
         batch_size=args.batch_size,
         debug=args.debug,
+        selection=args.selection,
     )
-    
+    ghs.epsilon_final = args.epsilon_final
+    # Periodic GHS checkpoints live inside the run directory (also where the W&B upload looks).
+    ghs.checkpoint_dir = os.path.join(args.output_dir, "ghs_checkpoint")
+
     # Configure evaluator
     ghs.evaluator = CodesignPPOEvaluator(
         build_script=args.build_script,
@@ -1853,6 +1891,7 @@ def main():
         seed=args.seed,
         eval_groups=eval_groups,
         shuffle_groups=args.shuffle_groups,
+        score_metric=args.focus_metric,
     )
     
     # Load checkpoint if provided
@@ -1873,7 +1912,10 @@ def main():
     # Track worst design from lookup table
     if ghs.lookup_table:
         # Filter out invalid scores (<=0.001) before finding worst
-        valid_lookup_items = [(k, v) for k, v in ghs.lookup_table.items() if v > 0.001]
+        valid_lookup_items = [
+            (k, v) for k, v in ghs.lookup_table.items()
+            if v > 0.001 and not k[0].startswith("partial:")  # only physical hands can be "worst"
+        ]
         
         if valid_lookup_items:
             (worst_key, worst_score) = min(valid_lookup_items, key=lambda x: x[1])

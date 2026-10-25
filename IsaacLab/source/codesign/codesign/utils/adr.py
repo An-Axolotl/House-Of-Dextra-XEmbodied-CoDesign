@@ -60,6 +60,22 @@ class LeapHandADR():
     def num_increments(self):
         return self.increment_counter
 
+    def set_level(self, level):
+        """Jump to an absolute ADR level: sets the counter AND applies every term's range
+        interpolated initial -> target by level/num_increments (increase_ranges() applies the
+        same formula one step at a time; set_num_increments() only moves the counter)."""
+        n = int(self.adr_cfg_dict["num_increments"])
+        level = max(0, min(int(level), n))
+        self.increment_counter = level
+        for term_name, term_params in self.adr_cfg_dict.items():
+            if term_name == "num_increments":
+                continue
+            term = self.event_manager.get_term_cfg(term_name)
+            for param_name in term_params:
+                lo0, hi0 = self.adr_cfg_dict_initial[term_name][param_name]
+                lo1, hi1 = self.adr_cfg_dict[term_name][param_name]
+                term.params[param_name] = (lo0 + (lo1 - lo0) * level / float(n), hi0 + (hi1 - hi0) * level / float(n))
+
     def set_num_increments(self, num_increments):
         self.increment_counter = num_increments
 

@@ -129,7 +129,12 @@ class ReorientationEnvCfg(DirectRLEnvCfg):
     F_MAX = 5 # maximum number of fingers
     L_MAX = 3 # max number of modifiable links per body (currently 2 due to latest solidworks assembly)
     G_SCALE_MAX = 10 # max number of grammar scaling per modifiable link, determines possible values between 0 and 1 for this observation
-    MORPH_DIM = F_MAX * (1 + 2 * L_MAX) # 1 for finger presence, and each modifiable link has L_MAX G_SCALE values 
+    # Fingertip-aware morphology conditioning. Off by default because the shipped checkpoints were
+    # trained without it (35-dim vector); set CODESIGN_MORPH_FINGERTIPS=1 for BOTH training and
+    # evaluation of new policies (55-dim vector). Assets must carry the "_t<letters>" name token.
+    include_fingertips_in_morph = os.getenv("CODESIGN_MORPH_FINGERTIPS", "0").strip().lower() in ("1", "true", "yes")
+    NUM_TIP_TYPES = 4
+    MORPH_DIM = F_MAX * (1 + 2 * L_MAX) + (F_MAX * NUM_TIP_TYPES if include_fingertips_in_morph else 0)
     NUM_OBJ_TYPES = 4
     hist_len = 3
     if enable_privileged_obs:

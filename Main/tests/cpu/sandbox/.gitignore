@@ -1,0 +1,5 @@
+# runtime outputs of Main/tests/cpu
+Main/
+out_*/
+study_results/
+*.log
